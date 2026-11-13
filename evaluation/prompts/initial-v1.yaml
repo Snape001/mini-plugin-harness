@@ -1,0 +1,6 @@
+name: benchmark-initial
+description: General initial coding task guidance
+version: '1'
+type: task
+stages: [initial]
+template: 'Task: {{task}}'

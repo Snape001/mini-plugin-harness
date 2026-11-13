@@ -1,0 +1,8 @@
+name: benchmark-followup
+description: General tool followup guidance
+version: '1'
+type: task
+stages: [tool_followup, resume]
+template: |
+  Continue the task: {{task}}
+  Use tool results as evidence and verify the result.

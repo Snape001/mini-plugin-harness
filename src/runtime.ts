@@ -10,9 +10,10 @@ import { createSkillsPlugin } from './plugins/skills.js'
 import { createPermissionPlugin } from './plugins/permission.js'
 import { createSessionPlugin } from './plugins/session.js'
 import { createMcpPlugin } from './plugins/mcp.js'
-import type { ApprovalHandler } from './types.js'
+import { createPromptPlugin } from './plugins/prompt.js'
+import type { AgentCapabilities, ApprovalHandler } from './types.js'
 
-export async function createRuntime(config: RuntimeConfig, fetchImpl?: typeof fetch, approvalHandler?: ApprovalHandler) {
+export async function createRuntime(config: RuntimeConfig, fetchImpl?: typeof fetch, approvalHandler?: ApprovalHandler, capabilities?: Partial<AgentCapabilities>) {
   if (config.plugins.includes('agent')) {
     for (const dependency of ['llm', 'tools', 'hooks', 'skills', 'session'] as const) {
       if (!config.plugins.includes(dependency)) throw new Error(`Plugin "agent" requires "${dependency}" in the plugins list`)
@@ -25,6 +26,9 @@ export async function createRuntime(config: RuntimeConfig, fetchImpl?: typeof fe
   }
   if (config.plugins.includes('mcp') && !config.plugins.includes('tools')) {
     throw new Error('Plugin "mcp" requires "tools" in the plugins list')
+  }
+  if (config.plugins.includes('prompt')) for (const dependency of ['session', 'llm'] as const) {
+    if (!config.plugins.includes(dependency)) throw new Error(`Plugin "prompt" requires "${dependency}" in the plugins list`)
   }
   if (config.plugins.includes('tools')) {
     try {
@@ -60,6 +64,7 @@ export async function createRuntime(config: RuntimeConfig, fetchImpl?: typeof fe
     })
   }
   const skillsPlugin = config.plugins.includes('skills') ? await createSkillsPlugin(config) : undefined
+  const promptPlugin = config.plugins.includes('prompt') ? await createPromptPlugin(config) : undefined
   const plugins = {
     logger: loggerPlugin,
     hooks: hooksPlugin,
@@ -69,13 +74,14 @@ export async function createRuntime(config: RuntimeConfig, fetchImpl?: typeof fe
     skills: skillsPlugin,
     permission: createPermissionPlugin(config, approvalHandler),
     session: createSessionPlugin(config),
-    agent: createAgentPlugin(config),
+    prompt: promptPlugin,
+    agent: createAgentPlugin(config, capabilities),
   }
   try {
-    const pluginOrder = ['logger', 'hooks', 'permission', 'llm', 'tools', 'mcp', 'skills', 'session', 'agent'] as const
+    const pluginOrder = ['logger', 'hooks', 'permission', 'llm', 'tools', 'mcp', 'skills', 'session', 'prompt', 'agent'] as const
     for (const name of pluginOrder.filter((candidate) => config.plugins.includes(candidate))) {
       current = name
-      const plugin = name === 'skills' ? skillsPlugin! : plugins[name]
+      const plugin = name === 'skills' ? skillsPlugin! : name === 'prompt' ? promptPlugin! : plugins[name]
       const scope = ctx.plugin(plugin)
       const state = (scope as unknown as { runtime?: ScopeState }).runtime ?? (scope as unknown as ScopeState)
       scopes.push(scope)

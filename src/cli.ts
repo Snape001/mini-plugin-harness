@@ -8,15 +8,22 @@ import type { AgentEvent, ApprovalHandler } from './types.js'
 import { TaskPausedError } from './plugins/agent.js'
 
 const program = new Command()
-program.name('miniharness').description('A lightweight plugin-based agent runtime').option('-c, --config <path>', 'YAML config file', 'miniharness.yml').option('-t, --task <task>', 'run one task and exit').option('-s, --session <id>', 'use an existing session')
-program.addHelpText('after', '\nInteractive commands:\n  :session new          Create and switch to a new session\n  :session list         List sessions\n  :session use <id>     Switch sessions\n  :tasks                List tasks in the active session\n  :resume <task-id>     Resume a paused or interrupted task\n')
+program.name('miniharness').description('A lightweight plugin-based agent runtime').option('-c, --config <path>', 'YAML config file', 'miniharness.yml').option('-t, --task <task>', 'run one task and exit').option('-s, --session <id>', 'use an existing session').option('--task-type <type>', 'task type for Prompt selection').option('--prompt-version <key@version...>', 'Prompt version override; repeatable', (value: string, previous: string[]) => [...previous, value], [] as string[])
+program.addHelpText('after', '\nInteractive commands:\n  :session new          Create and switch to a new session\n  :session list         List sessions\n  :session use <id>     Switch sessions\n  :tasks                List tasks in the active session\n  :resume <task-id>     Resume a paused or interrupted task\n  :prompt list          List Prompt templates\n  :prompt trace <id>    Show Prompt request traces\n  :prompt enable <id>   Enable a Prompt for this runtime\n  :prompt disable <id>  Disable a Prompt for this runtime\n')
 program.parse()
-const options = program.opts<{ config: string; task?: string; session?: string }>()
+const options = program.opts<{ config: string; task?: string; session?: string; taskType?: string; promptVersion: string[] }>()
+const promptVersions: Record<string, string> = {}
+for (const value of options.promptVersion) {
+  const at = value.lastIndexOf('@')
+  if (at < 1 || at === value.length - 1) throw new Error(`Invalid --prompt-version: ${value}`)
+  promptVersions[value.slice(0, at)] = value.slice(at + 1)
+}
 
 function showEvent(event: AgentEvent) {
   switch (event.type) {
     case 'skills.selecting': stdout.write(`\n[skills] matching task against ${event.candidates} available Skill(s)\n`); break
     case 'skills.selected': stdout.write(`[skills] selected: ${event.names.length ? event.names.join(', ') : '(none)'}\n`); break
+    case 'skills.failed': stdout.write(`[skills] selection failed; continuing without Skills: ${event.reason}\n`); break
     case 'skills.loaded': stdout.write(`[skills] loaded ${event.name}\n`); break
     case 'model.request': stdout.write(`\n[model] request #${event.iteration}\n`); break
     case 'tool.start': stdout.write(`[tool] ${event.name} started\n`); break
@@ -66,7 +73,7 @@ async function main() {
     let activeSession = options.session ? runtime.ctx.session.getSession(options.session) : runtime.ctx.session.createSession()
     stdout.write(`[session] ${activeSession.id}\n`)
     if (options.task) {
-      try { await runTask((signal) => runtime!.ctx.agent.run(options.task!, activeSession.id, showEvent, signal)) }
+      try { await runTask((signal) => runtime!.ctx.agent.run(options.task!, activeSession.id, showEvent, signal, { taskType: options.taskType, versions: promptVersions })) }
       catch (error) {
         const latest = runtime.ctx.session.listTasks(activeSession.id)[0]
         if (latest?.status === 'interrupted') stdout.write(`[task] interrupted; use :resume ${latest.id} to continue\n`)
@@ -97,6 +104,18 @@ async function main() {
       }
       if (task === ':tasks') {
         for (const record of runtime.ctx.session.listTasks(activeSession.id)) stdout.write(`${record.id}  ${record.status}  ${record.prompt.slice(0, 100)}\n`)
+        continue
+      }
+      if (task.startsWith(':prompt')) {
+        try {
+          const [, action, value] = task.split(/\s+/, 3)
+          const prompt = runtime.ctx.get('prompt')
+          if (!prompt) { stdout.write('Prompt plugin is disabled\n'); continue }
+          if (action === 'list') for (const item of prompt.list()) stdout.write(`${item.id}  ${item.enabled ? 'enabled' : 'disabled'}  ${item.description}\n`)
+          else if (action === 'trace' && value) stdout.write(`${JSON.stringify(prompt.traces(value), null, 2)}\n`)
+          else if ((action === 'enable' || action === 'disable') && value) prompt.setEnabled(value, action === 'enable')
+          else stdout.write('Usage: :prompt list | trace <task-id> | enable <id> | disable <id>\n')
+        } catch (error) { console.error(`[error] ${(error as Error).message}`) }
         continue
       }
       if (task.startsWith(':resume')) {

@@ -1,14 +1,11 @@
 ---
 name: repo-analysis
-description: Map a repository's structure and explain how its components, data flow, and key functions fit together. Use when a user asks to understand a project, locate an implementation, or summarize architecture.
-tags:
-  - repository
-  - architecture
-  - code
+description: Locate code and explain repository structure, component responsibilities, or data flow. Use for understanding and navigation requests; not for defect review or code changes.
+tags: [repository, architecture, navigation]
 ---
 
 # Repository analysis
 
-Start with a bounded file listing, then inspect manifests, entry points, and the requested implementation. Trace important calls or data flow across files instead of describing folders in isolation.
+Start with a bounded file listing. Read manifests, entry points, and the relevant implementation, then trace calls and data flow across files. Explain the requested behavior with paths and line numbers when available. State what remains unverified.
 
-Summarize the repository structure, identify the relevant files and functions, and explain how they work together. Support claims with file paths and line numbers where available. Be explicit about anything you could not verify from the files you inspected.
+For a reported defect, use bug-investigation; for a requested edit, use targeted-code-fix or multi-file-consistency.

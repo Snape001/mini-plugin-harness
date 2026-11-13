@@ -161,7 +161,7 @@ describe('SQLite sessions and recovery', () => {
       }
       const fakeLlm = { summarize: vi.fn(async () => 'Summary covering the four earlier tasks.') } as unknown as LlmService
       const context = await buildContext(config, runtime.ctx.session, fakeLlm, session.id, [], [])
-      expect(fakeLlm.summarize).toHaveBeenCalledOnce()
+      expect(fakeLlm.summarize).toHaveBeenCalled()
       expect(runtime.ctx.session.getSummary(session.id)?.content).toContain('four earlier tasks')
       expect(runtime.ctx.session.getSummary(session.id)?.fromMessageId).toBeLessThan(runtime.ctx.session.getSummary(session.id)!.throughMessageId)
       expect(context.some((message) => message.content?.includes('Summary of earlier conversation'))).toBe(true)

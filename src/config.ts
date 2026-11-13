@@ -3,7 +3,7 @@ import path from 'node:path'
 import { load } from 'js-yaml'
 import { z } from 'zod'
 
-const pluginNames = ['logger', 'hooks', 'permission', 'llm', 'tools', 'mcp', 'skills', 'session', 'agent'] as const
+const pluginNames = ['logger', 'hooks', 'permission', 'llm', 'tools', 'mcp', 'skills', 'session', 'prompt', 'agent'] as const
 const configuredPlugins = pluginNames.filter((name) => name !== 'mcp')
 const toolPermissionSchema = z.enum(['read', 'write', 'dangerous'])
 const mcpServerBase = z.object({
@@ -46,6 +46,18 @@ const permissionsSchema = z.object({
 export const configSchema = z.object({
   projectRoot: z.string().default('.'),
   skillsDir: z.string().default('./skills'),
+  skills: z.object({
+    maxSkillTokens: z.number().int().min(64).max(8192).default(1200),
+    maxTotalTokens: z.number().int().min(64).max(16384).default(2400),
+  }).strict().default({ maxSkillTokens: 1200, maxTotalTokens: 2400 }),
+  promptsDir: z.string().default('./prompts'),
+  prompts: z.object({
+    disabled: z.array(z.string()).default([]),
+    versions: z.record(z.string(), z.string()).default({}),
+    variables: z.record(z.string(), z.string()).default({}),
+    selector: z.enum(['rules', 'llm']).default('rules'),
+    taskTypes: z.array(z.object({ type: z.string().min(1), keywords: z.array(z.string()).default([]), regex: z.string().optional() }).strict()).default([]),
+  }).strict().default({ disabled: [], versions: {}, variables: {}, selector: 'rules', taskTypes: [] }),
   maxIterations: z.number().int().min(1).max(100).default(8),
   maxTaskIterations: z.number().int().min(1).max(10_000).default(100),
   toolRetries: z.number().int().min(0).max(5).default(1),
@@ -55,6 +67,15 @@ export const configSchema = z.object({
   sessionDb: z.string().default('./.miniharness/sessions.sqlite'),
   contextInputTokens: z.number().int().min(1024).default(16_000),
   contextOutputReserve: z.number().int().min(128).default(2_048),
+  context: z.object({
+    softThreshold: z.number().min(0.5).max(1).default(0.8),
+    layers: z.object({
+      L0: z.object({ initial: z.number().int().min(64).default(6000), max: z.number().int().min(64).default(12000) }).strict().default({ initial: 6000, max: 12000 }),
+      L1: z.object({ initial: z.number().int().min(32).default(1800), max: z.number().int().min(32).default(4000) }).strict().default({ initial: 1800, max: 4000 }),
+      L2: z.object({ initial: z.number().int().min(32).default(900), max: z.number().int().min(32).default(2400) }).strict().default({ initial: 900, max: 2400 }),
+      L3: z.object({ initial: z.number().int().min(32).default(450), max: z.number().int().min(32).default(1200) }).strict().default({ initial: 450, max: 1200 }),
+    }).strict().default({ L0: { initial: 6000, max: 12000 }, L1: { initial: 1800, max: 4000 }, L2: { initial: 900, max: 2400 }, L3: { initial: 450, max: 1200 } }),
+  }).strict().default({ softThreshold: 0.8, layers: { L0: { initial: 6000, max: 12000 }, L1: { initial: 1800, max: 4000 }, L2: { initial: 900, max: 2400 }, L3: { initial: 450, max: 1200 } } }),
   plugins: z.array(z.enum(pluginNames)).min(1).default([...configuredPlugins]),
   permissions: permissionsSchema,
   mcp: mcpSchema,
@@ -62,8 +83,14 @@ export const configSchema = z.object({
   if (config.maxTaskIterations < config.maxIterations) {
     context.addIssue({ code: 'custom', path: ['maxTaskIterations'], message: 'must be greater than or equal to maxIterations' })
   }
+  if (config.skills.maxTotalTokens < config.skills.maxSkillTokens) {
+    context.addIssue({ code: 'custom', path: ['skills', 'maxTotalTokens'], message: 'must be greater than or equal to maxSkillTokens' })
+  }
   if (config.contextOutputReserve >= config.contextInputTokens) {
     context.addIssue({ code: 'custom', path: ['contextOutputReserve'], message: 'must be smaller than contextInputTokens' })
+  }
+  for (const [level, budget] of Object.entries(config.context.layers)) {
+    if (budget.initial > budget.max) context.addIssue({ code: 'custom', path: ['context', 'layers', level], message: 'initial must be no greater than max' })
   }
   const seen = new Set<string>()
   config.plugins.forEach((name, index) => {
@@ -94,6 +121,7 @@ export async function loadConfig(filePath: string): Promise<RuntimeConfig> {
     ...result.data,
     projectRoot: path.resolve(configDir, result.data.projectRoot),
     skillsDir: path.resolve(configDir, result.data.skillsDir),
+    promptsDir: path.resolve(configDir, result.data.promptsDir),
     sessionDb: path.resolve(configDir, result.data.sessionDb),
     mcp: {
       ...result.data.mcp,

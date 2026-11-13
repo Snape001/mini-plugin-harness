@@ -12,6 +12,18 @@ const configFor = (projectRoot: string, extra: Record<string, unknown> = {}) => 
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))) })
 
 describe('project tools', () => {
+  it('hides disabled tools from model schemas and rejects execution attempts', async () => {
+    const root = await tempDir()
+    const runtime = await createRuntime(configFor(root), fetch)
+    try {
+      runtime.ctx.tools.setToolsEnabled(['read_file', 'search_text'], false)
+      expect(runtime.ctx.tools.definitions().some((tool) => tool.name === 'read_file' || tool.name === 'search_text')).toBe(false)
+      await expect(runtime.ctx.tools.execute('read_file', { path: 'missing.txt' })).rejects.toThrow(/disabled/)
+      runtime.ctx.tools.setToolsEnabled(['read_file', 'search_text'], true)
+      expect(runtime.ctx.tools.definitions().some((tool) => tool.name === 'read_file')).toBe(true)
+    } finally { await runtime.dispose() }
+  })
+
   it('lists, searches, and reads project files', async () => {
     const root = await tempDir()
     await mkdir(path.join(root, 'src'))
@@ -28,15 +40,24 @@ describe('project tools', () => {
     } finally { await runtime.dispose() }
   })
 
-  it('truncates large shell output without killing the process', async () => {
+  it('returns the complete contents of a large file for durable tool history', async () => {
+    const root = await tempDir()
+    const content = `begin-${'content'.repeat(6000)}-end`
+    await writeFile(path.join(root, 'large.txt'), content)
+    const runtime = await createRuntime(configFor(root), fetch)
+    try {
+      expect((await runtime.ctx.tools.execute('read_file', { path: 'large.txt' })).content[0].text).toBe(content)
+    } finally { await runtime.dispose() }
+  })
+
+  it('returns complete shell output within the execution buffer', async () => {
     const root = await tempDir()
     const runtime = await createRuntime(configFor(root), fetch, async () => true)
     try {
       const command = `"${process.execPath}" -e "process.stdout.write('x'.repeat(40000))"`
       const result = await runtime.ctx.tools.execute('run_shell', { command }, 'large-output')
       const output = result.structuredContent as { stdout: string; stderr: string }
-      expect(output.stdout.endsWith('\n[truncated]')).toBe(true)
-      expect(output.stdout.length).toBe(30_000 + '\n[truncated]'.length)
+      expect(output.stdout).toBe('x'.repeat(40000))
     } finally { await runtime.dispose() }
   })
 

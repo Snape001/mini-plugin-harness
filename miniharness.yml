@@ -1,5 +1,9 @@
 projectRoot: .
 skillsDir: ./skills
+skills:
+  maxSkillTokens: 1200
+  maxTotalTokens: 2400
+promptsDir: ./prompts
 maxIterations: 8
 maxTaskIterations: 100
 toolRetries: 1
@@ -7,6 +11,13 @@ model: deepseek-flash
 sessionDb: ./.miniharness/sessions.sqlite
 contextInputTokens: 16000
 contextOutputReserve: 2048
+context:
+  softThreshold: 0.8
+  layers:
+    L0: { initial: 6000, max: 12000 }
+    L1: { initial: 1800, max: 4000 }
+    L2: { initial: 900, max: 2400 }
+    L3: { initial: 450, max: 1200 }
 plugins:
   - logger
   - hooks
@@ -15,7 +26,14 @@ plugins:
   - tools
   - skills
   - session
+  - prompt
   - agent
+prompts:
+  disabled: []
+  versions: {}
+  variables: {}
+  selector: rules
+  taskTypes: []
 permissions:
   allow: []
   deny: []

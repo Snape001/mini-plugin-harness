@@ -21,12 +21,6 @@ const definitions: ToolDefinition[] = [
 ]
 const ignored = new Set(['.git', '.miniharness', 'node_modules', 'dist', 'coverage'])
 const maxShellBuffer = 1_048_576
-const maxShellOutput = 30_000
-
-function truncateShellOutput(value: string | Buffer | undefined): string {
-  const text = String(value ?? '')
-  return text.length > maxShellOutput ? `${text.slice(0, maxShellOutput)}\n[truncated]` : text
-}
 const inputSchemas = {
   list_files: z.object({ path: z.string().optional() }).strict(),
   search_text: z.object({ query: z.string().min(1), path: z.string().optional() }).strict(),
@@ -188,8 +182,7 @@ export function createToolsPlugin(config: RuntimeConfig) {
           return files.sort().slice(0, 500)
         }
         if (name === 'read_file') {
-          const content = await readSafeFile(args.path as string, signal)
-          return content.length > 30_000 ? `${content.slice(0, 30_000)}\n[truncated]` : content
+          return readSafeFile(args.path as string, signal)
         }
         if (name === 'search_text') {
           const start = await checkComponents(typeof args.path === 'string' ? args.path : '.')
@@ -221,12 +214,12 @@ export function createToolsPlugin(config: RuntimeConfig) {
               windowsHide: true,
               ...(signal ? { signal } : {}),
             })
-            return { stdout: truncateShellOutput(stdout), stderr: truncateShellOutput(stderr) }
+            return { stdout: String(stdout), stderr: String(stderr) }
           } catch (cause) {
             const error = cause as Error & { code?: string | number | null; signal?: string | null; stdout?: string | Buffer; stderr?: string | Buffer }
             const exit = error.code != null ? `exit ${error.code}` : error.signal ? `signal ${error.signal}` : 'timed out or killed'
-            const stdout = truncateShellOutput(error.stdout)
-            const stderr = truncateShellOutput(error.stderr ?? error.message)
+            const stdout = String(error.stdout ?? '')
+            const stderr = String(error.stderr ?? error.message)
             const details = `${stdout ? `\nstdout:\n${stdout}` : ''}${stderr ? `\nstderr:\n${stderr}` : ''}`
             throw new ToolExecutionError(`Shell command failed (${exit}): ${error.message}${details}`, 'dangerous', { cause: error })
           }
@@ -235,6 +228,7 @@ export function createToolsPlugin(config: RuntimeConfig) {
       }
 
       const registry = new Map<string, { sourceId: string; registration: ToolRegistration }>()
+      const disabledTools = new Set<string>()
       for (const definition of definitions) {
         const name = definition.name as keyof typeof inputSchemas
         registry.set(definition.name, {
@@ -248,7 +242,13 @@ export function createToolsPlugin(config: RuntimeConfig) {
       }
 
       const service: ToolService = {
-        definitions: () => [...registry.values()].map(({ registration }) => ({ ...registration.definition })),
+        definitions: () => [...registry].filter(([name]) => !disabledTools.has(name)).map(([, { registration }]) => ({ ...registration.definition })),
+        setToolsEnabled(names, enabled) {
+          for (const name of names) {
+            if (enabled) disabledTools.delete(name)
+            else disabledTools.add(name)
+          }
+        },
         replaceSource(sourceId, registrations) {
           const ownedNames = new Set([...registry].filter(([, entry]) => entry.sourceId === sourceId).map(([name]) => name))
           const seen = new Set<string>()
@@ -275,6 +275,7 @@ export function createToolsPlugin(config: RuntimeConfig) {
         },
         async execute(rawName, rawArgs, suppliedCallId, options = {}) {
           const entry = registry.get(rawName)
+          if (disabledTools.has(rawName)) throw new PermissionDeniedError(`Tool is disabled: ${rawName}`)
           const registration = entry?.registration
           const definition = registration?.definition
           if (!registration || !definition) throw new PermissionDeniedError(`Unknown tool: ${rawName}`)

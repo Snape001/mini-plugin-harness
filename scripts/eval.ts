@@ -4,7 +4,8 @@ import path from 'node:path'
 import { configSchema } from '../src/config.js'
 import { createRuntime } from '../src/runtime.js'
 import { TaskPausedError } from '../src/plugins/agent.js'
-import type { ToolRegistration } from '../src/types.js'
+import { buildContext, estimateTokens } from '../src/context.js'
+import type { LlmService, ToolRegistration } from '../src/types.js'
 
 type ScenarioResult = { name: string; status: 'passed' | 'failed' | 'skipped'; durationMs: number; detail?: string }
 const results: ScenarioResult[] = []
@@ -168,6 +169,38 @@ async function longTaskResume() {
   } finally { await runtime.dispose() }
 }
 
+async function contextSummaryFailureRecovery() {
+  const root = await tempRoot()
+  const config = makeConfig(root, { plugins: ['session'], contextInputTokens: 1024, contextOutputReserve: 128 })
+  const runtime = await createRuntime(config)
+  try {
+    const session = runtime.ctx.session.createSession()
+    const task = runtime.ctx.session.startTask(session.id, 'preserve findings across context compression')
+    for (let index = 0; index < 12; index++) runtime.ctx.session.appendMessage(task.id, { role: 'assistant', content: `finding-${index} ${'detail '.repeat(45)}` })
+    const summarizer = (content: string, fail = false) => ({ summarize: async () => {
+      if (fail) throw new Error('deterministic summary outage')
+      return content
+    } }) as unknown as LlmService
+    await buildContext(config, runtime.ctx.session, summarizer('initial checkpoint'), session.id, [], [])
+    const before = runtime.ctx.session.listContextCheckpoints(session.id)
+    if (!before.length) throw new Error('initial context checkpoint was not saved')
+    const raw = `RAW-START ${'uncompressible '.repeat(750)} RAW-END`
+    runtime.ctx.session.appendMessage(task.id, { role: 'assistant', content: raw })
+    try {
+      await buildContext(config, runtime.ctx.session, summarizer('', true), session.id, [], [])
+      throw new Error('summary outage unexpectedly allowed an oversized context')
+    } catch (error) {
+      if (!(error as Error).message.includes('summary failed after three budget attempts: deterministic summary outage')) throw error
+    }
+    if (JSON.stringify(runtime.ctx.session.listContextCheckpoints(session.id)) !== JSON.stringify(before)) throw new Error('failed summary changed a valid checkpoint')
+    if (runtime.ctx.session.listMessages(session.id).at(-1)?.message.content !== raw) throw new Error('failed summary changed raw history')
+    const projected = await buildContext(config, runtime.ctx.session, summarizer('recovered checkpoint'), session.id, [], [])
+    if (projected.reduce((sum, message) => sum + estimateTokens(message), 0) + estimateTokens([]) > 896) throw new Error('recovered context exceeded hard budget')
+    if (runtime.ctx.session.listContextCheckpoints(session.id).at(-1)!.throughMessageId <= before.at(-1)!.throughMessageId) throw new Error('checkpoint did not advance after recovery')
+    return 'Summary outage preserved raw history and checkpoints; recovery resumed within the hard input budget.'
+  } finally { await runtime.dispose() }
+}
+
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
   const promise = new Promise<T>((done) => { resolve = done })
@@ -185,6 +218,7 @@ async function main() {
   await scenario('mcp-failure-isolation', mcpFailureIsolation)
   await scenario('tool-failure-trace', toolFailureTrace)
   await scenario('long-task-resume', longTaskResume)
+  await scenario('context-summary-failure-recovery', contextSummaryFailureRecovery)
 
   const reportDirectory = path.resolve('.miniharness', 'evals')
   await mkdir(reportDirectory, { recursive: true })

@@ -1,5 +1,5 @@
 import type { Context, Events } from 'cordis'
-import type { AgentEvent, AgentService, HookService, LlmService, McpService, PermissionService, SessionService, SkillService, ToolCall, ToolService } from './types.js'
+import type { AgentEvent, AgentService, HookService, LlmService, McpService, PermissionService, PromptService, SessionService, SkillService, ToolCall, ToolService } from './types.js'
 
 declare module 'cordis' {
   interface Context {
@@ -11,6 +11,7 @@ declare module 'cordis' {
     skills: SkillService
     agent: AgentService
     session: SessionService
+    prompt: PromptService
   }
   interface Events {
     'agent/event': (event: AgentEvent) => void

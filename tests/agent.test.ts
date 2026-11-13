@@ -40,10 +40,38 @@ describe('Agent loop and DeepSeek adapter', () => {
       const firstAgentMessages = requests[1].messages as Array<{ role: string; content?: string }>
       expect(firstAgentMessages.filter((message) => message.role === 'user')).toHaveLength(2)
       expect(firstAgentMessages[1].content).toContain('structured repository analysis workflow')
-      expect((requests[2].messages as unknown[]).length).toBeGreaterThan(4)
+      const secondAgentMessages = requests[2].messages as Array<{ role: string; tool_calls?: Array<{ id: string }>; tool_call_id?: string }>
+      expect(secondAgentMessages.some((message) => message.role === 'assistant' && message.tool_calls?.[0]?.id === '1')).toBe(true)
+      expect(secondAgentMessages.some((message) => message.role === 'tool' && message.tool_call_id === '1')).toBe(true)
       expect(events.filter((event) => event === 'tool.start')).toHaveLength(2)
       expect(events).toContain('skills.loaded')
       expect(events.at(-1)).toBe('agent.final')
+    } finally { await runtime.dispose() }
+  })
+
+  it('caches an empty Skills choice only for an exact task and registry match', async () => {
+    process.env.DEEPSEEK_API_KEY = 'test-secret'
+    const root = await tempDir()
+    await mkdir(path.join(root, 'skills', 'repo-analysis'), { recursive: true })
+    await writeFile(path.join(root, 'skills', 'repo-analysis', 'SKILL.md'), '---\nname: repo-analysis\ndescription: Analyze repository structure.\n---\nInspect the repository.')
+    let selections = 0
+    const fakeFetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { response_format?: unknown }
+      if (body.response_format) selections++
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: body.response_format ? '{"skills":[]}' : 'Done.' } }], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } }), { status: 200 })
+    }) as typeof fetch
+    const runtime = await createRuntime(configFor(root), fakeFetch)
+    try {
+      const session = runtime.ctx.session.createSession()
+      await runtime.ctx.agent.run('inspect this exact task', session.id)
+      await runtime.ctx.agent.run('inspect this exact task', session.id)
+      const tasks = runtime.ctx.session.listTasks(session.id)
+      expect(selections).toBe(1)
+      const firstTwoTraces = tasks.map((task) => runtime.ctx.session.getSkillTrace(task.id)!)
+      expect(firstTwoTraces).toContainEqual(expect.objectContaining({ selected: [], selectionRequests: 1, selectionCacheHit: false }))
+      expect(firstTwoTraces).toContainEqual(expect.objectContaining({ selected: [], selectionRequests: 0, selectionCacheHit: true }))
+      await runtime.ctx.agent.run('inspect a different task', session.id)
+      expect(selections).toBe(2)
     } finally { await runtime.dispose() }
   })
 

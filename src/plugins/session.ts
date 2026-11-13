@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import type { Context } from 'cordis'
 import type { RuntimeConfig } from '../config.js'
 import '../services.js'
-import type { ChatMessage, SessionRecord, SessionService, StoredCall, StoredMessage, SummaryCheckpoint, TaskRecord, TaskStatus, ToolCall } from '../types.js'
+import type { ChatMessage, ContextCheckpoint, PromptTrace, SessionRecord, SessionService, SkillTrace, StoredCall, StoredMessage, SummaryCheckpoint, TaskRecord, TaskStatus, ToolCall } from '../types.js'
 
 const now = () => new Date().toISOString()
 
@@ -45,7 +45,13 @@ export function createSessionPlugin(config: RuntimeConfig) {
         CREATE INDEX IF NOT EXISTS messages_task ON messages(task_id, id);
         CREATE TABLE IF NOT EXISTS tool_calls (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), name TEXT NOT NULL, arguments TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','failed','unknown')), result TEXT);
         CREATE TABLE IF NOT EXISTS summaries (session_id TEXT NOT NULL REFERENCES sessions(id), from_message_id INTEGER NOT NULL DEFAULT 0, through_message_id INTEGER NOT NULL, content TEXT NOT NULL, PRIMARY KEY(session_id, through_message_id));
-        CREATE TABLE IF NOT EXISTS tool_attempts (call_id TEXT NOT NULL REFERENCES tool_calls(id) ON DELETE CASCADE, attempt INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed','unknown')), started_at TEXT NOT NULL, finished_at TEXT, duration_ms INTEGER, error_code TEXT, error TEXT, approval TEXT, PRIMARY KEY(call_id, attempt));`)
+        CREATE TABLE IF NOT EXISTS task_summaries (task_id TEXT NOT NULL REFERENCES tasks(id), from_message_id INTEGER NOT NULL, through_message_id INTEGER NOT NULL, content TEXT NOT NULL, PRIMARY KEY(task_id, through_message_id));
+        CREATE TABLE IF NOT EXISTS context_checkpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), task_id TEXT REFERENCES tasks(id), level TEXT NOT NULL CHECK(level IN ('L1','L2','L3')), from_message_id INTEGER NOT NULL, through_message_id INTEGER NOT NULL, content TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS context_checkpoints_scope ON context_checkpoints(session_id, task_id, from_message_id);
+        CREATE TABLE IF NOT EXISTS tool_attempts (call_id TEXT NOT NULL REFERENCES tool_calls(id) ON DELETE CASCADE, attempt INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed','unknown')), started_at TEXT NOT NULL, finished_at TEXT, duration_ms INTEGER, error_code TEXT, error TEXT, approval TEXT, PRIMARY KEY(call_id, attempt));
+        CREATE TABLE IF NOT EXISTS prompt_snapshots (task_id TEXT PRIMARY KEY REFERENCES tasks(id), body TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS prompt_traces (task_id TEXT NOT NULL REFERENCES tasks(id), iteration INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(task_id, iteration));`)
+      db.exec('CREATE TABLE IF NOT EXISTS skill_traces (task_id TEXT PRIMARY KEY REFERENCES tasks(id), body TEXT NOT NULL)')
       try { db.exec('ALTER TABLE tasks ADD COLUMN skills_selected INTEGER NOT NULL DEFAULT 0') } catch (error) { if (!isDuplicateColumn(error)) throw error }
       const taskSql = (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'").get() as { sql: string } | undefined)?.sql ?? ''
       if (!taskSql.includes("'paused'")) {
@@ -114,6 +120,15 @@ export function createSessionPlugin(config: RuntimeConfig) {
           })
         },
         setTaskSkills(id, skills) { db.prepare('UPDATE tasks SET skills = ?, skills_selected = 1 WHERE id = ?').run(JSON.stringify(skills), id) },
+        saveSkillTrace(trace) {
+          taskRow(trace.taskId)
+          db.prepare('INSERT INTO skill_traces(task_id, body) VALUES (?, ?) ON CONFLICT(task_id) DO UPDATE SET body = excluded.body').run(trace.taskId, JSON.stringify(trace))
+        },
+        getSkillTrace(taskId) {
+          taskRow(taskId)
+          const row = db.prepare('SELECT body FROM skill_traces WHERE task_id = ?').get(taskId) as { body: string } | undefined
+          return row ? JSON.parse(row.body) as SkillTrace : undefined
+        },
         setTaskStatus(id, status, error) {
           const old = taskRow(id).status
           const valid = (old === 'running' && ['paused', 'interrupted', 'completed', 'failed'].includes(status)) || (['paused', 'interrupted'].includes(old) && status === 'running')
@@ -136,6 +151,19 @@ export function createSessionPlugin(config: RuntimeConfig) {
             .map((row): StoredMessage => ({ id: Number(row.id), taskId: String(row.task_id), message: JSON.parse(String(row.body)) as ChatMessage }))
           messageCache.set(sessionId, messages)
           return messages.map(cloneStored)
+        },
+        listMessagesSince(sessionId, afterMessageId, taskId) {
+          sessionRow(sessionId)
+          if (taskId && taskRow(taskId).sessionId !== sessionId) throw new Error(`Task ${taskId} is not in session ${sessionId}`)
+          const rows = taskId
+            ? db.prepare('SELECT id, task_id, body FROM messages WHERE task_id = ? AND id > ? ORDER BY id').all(taskId, afterMessageId)
+            : db.prepare('SELECT m.id, m.task_id, m.body FROM messages m JOIN tasks t ON t.id = m.task_id WHERE t.session_id = ? AND m.id > ? ORDER BY m.id').all(sessionId, afterMessageId)
+          return (rows as Array<{ id: number; task_id: string; body: string }>).map((row) => ({ id: row.id, taskId: row.task_id, message: JSON.parse(row.body) as ChatMessage }))
+        },
+        getLastMessage(taskId) {
+          taskRow(taskId)
+          const row = db.prepare('SELECT id, task_id, body FROM messages WHERE task_id = ? ORDER BY id DESC LIMIT 1').get(taskId) as { id: number; task_id: string; body: string } | undefined
+          return row ? { id: row.id, taskId: row.task_id, message: JSON.parse(row.body) as ChatMessage } : undefined
         },
         startCall(id) {
           const result = db.prepare("UPDATE tool_calls SET status = 'running' WHERE id = ? AND status = 'pending'").run(id)
@@ -176,12 +204,65 @@ export function createSessionPlugin(config: RuntimeConfig) {
             service.finishCall(call.id, 'unknown', 'Error: Tool execution status is unknown after interruption. The tool was not retried; inspect the current state before further action.')
           }
         },
-        getSummary(sessionId) {
-          const row = db.prepare('SELECT from_message_id, through_message_id, content FROM summaries WHERE session_id = ? ORDER BY through_message_id DESC LIMIT 1').get(sessionId) as { from_message_id: number; through_message_id: number; content: string } | undefined
+        getSummary(sessionId, taskId) {
+          if (taskId && taskRow(taskId).sessionId !== sessionId) throw new Error(`Task ${taskId} is not in session ${sessionId}`)
+          const row = (taskId
+            ? db.prepare('SELECT from_message_id, through_message_id, content FROM task_summaries WHERE task_id = ? ORDER BY through_message_id DESC LIMIT 1').get(taskId)
+            : db.prepare('SELECT from_message_id, through_message_id, content FROM summaries WHERE session_id = ? ORDER BY through_message_id DESC LIMIT 1').get(sessionId)) as { from_message_id: number; through_message_id: number; content: string } | undefined
           return row ? { sessionId, fromMessageId: row.from_message_id, throughMessageId: row.through_message_id, content: row.content } satisfies SummaryCheckpoint : undefined
         },
-        saveSummary(sessionId, fromMessageId, throughMessageId, content) {
-          db.prepare('INSERT INTO summaries(session_id, from_message_id, through_message_id, content) VALUES (?, ?, ?, ?)').run(sessionId, fromMessageId, throughMessageId, content)
+        saveSummary(sessionId, fromMessageId, throughMessageId, content, taskId) {
+          if (taskId) {
+            if (taskRow(taskId).sessionId !== sessionId) throw new Error(`Task ${taskId} is not in session ${sessionId}`)
+            db.prepare('INSERT INTO task_summaries(task_id, from_message_id, through_message_id, content) VALUES (?, ?, ?, ?) ON CONFLICT(task_id, through_message_id) DO UPDATE SET from_message_id = excluded.from_message_id, content = excluded.content').run(taskId, fromMessageId, throughMessageId, content)
+          } else db.prepare('INSERT INTO summaries(session_id, from_message_id, through_message_id, content) VALUES (?, ?, ?, ?) ON CONFLICT(session_id, through_message_id) DO UPDATE SET from_message_id = excluded.from_message_id, content = excluded.content').run(sessionId, fromMessageId, throughMessageId, content)
+        },
+        listContextCheckpoints(sessionId, taskId) {
+          sessionRow(sessionId)
+          if (taskId && taskRow(taskId).sessionId !== sessionId) throw new Error(`Task ${taskId} is not in session ${sessionId}`)
+          const rows = db.prepare('SELECT id, session_id, task_id, level, from_message_id, through_message_id, content FROM context_checkpoints WHERE session_id = ? AND task_id IS ? ORDER BY from_message_id, id').all(sessionId, taskId ?? null) as Array<Record<string, unknown>>
+          return rows.map((row): ContextCheckpoint => ({ id: Number(row.id), sessionId: String(row.session_id), ...(row.task_id === null ? {} : { taskId: String(row.task_id) }), level: row.level as ContextCheckpoint['level'], fromMessageId: Number(row.from_message_id), throughMessageId: Number(row.through_message_id), content: String(row.content) }))
+        },
+        replaceContextCheckpoints(sessionId, removedIds, checkpoint, taskId) {
+          sessionRow(sessionId)
+          if (taskId && taskRow(taskId).sessionId !== sessionId) throw new Error(`Task ${taskId} is not in session ${sessionId}`)
+          if (checkpoint.sessionId !== sessionId || (checkpoint.taskId ?? undefined) !== taskId || checkpoint.fromMessageId > checkpoint.throughMessageId) throw new Error('Invalid context checkpoint scope or range')
+          transaction(() => {
+            for (const id of removedIds) {
+              const result = db.prepare('DELETE FROM context_checkpoints WHERE id = ? AND session_id = ? AND task_id IS ?').run(id, sessionId, taskId ?? null)
+              if (!result.changes) throw new Error(`Unknown context checkpoint: ${id}`)
+            }
+            const overlap = db.prepare('SELECT id FROM context_checkpoints WHERE session_id = ? AND task_id IS ? AND from_message_id <= ? AND through_message_id >= ? LIMIT 1').get(sessionId, taskId ?? null, checkpoint.throughMessageId, checkpoint.fromMessageId)
+            if (overlap) throw new Error('Overlapping context checkpoint')
+            db.prepare('INSERT INTO context_checkpoints(session_id, task_id, level, from_message_id, through_message_id, content) VALUES (?, ?, ?, ?, ?, ?)').run(sessionId, taskId ?? null, checkpoint.level, checkpoint.fromMessageId, checkpoint.throughMessageId, checkpoint.content)
+          })
+        },
+        listMessagesRange(sessionId, fromMessageId, throughMessageId, taskId) {
+          sessionRow(sessionId)
+          if (taskId && taskRow(taskId).sessionId !== sessionId) throw new Error(`Task ${taskId} is not in session ${sessionId}`)
+          const rows = db.prepare(`SELECT m.id, m.task_id, m.body FROM messages m JOIN tasks t ON t.id = m.task_id WHERE t.session_id = ? AND m.id BETWEEN ? AND ? ${taskId ? 'AND m.task_id = ?' : ''} ORDER BY m.id`).all(...(taskId ? [sessionId, fromMessageId, throughMessageId, taskId] : [sessionId, fromMessageId, throughMessageId])) as Array<{ id: number; task_id: string; body: string }>
+          return rows.map((row) => ({ id: row.id, taskId: row.task_id, message: JSON.parse(row.body) as ChatMessage }))
+        },
+        getPromptSnapshot(taskId) {
+          const row = db.prepare('SELECT body FROM prompt_snapshots WHERE task_id = ?').get(taskId) as { body: string } | undefined
+          return row ? JSON.parse(row.body) : undefined
+        },
+        savePromptSnapshot(taskId, snapshot) {
+          db.prepare('INSERT INTO prompt_snapshots(task_id, body) VALUES (?, ?)').run(taskId, JSON.stringify(snapshot))
+        },
+        startPromptTrace(trace) {
+          db.prepare('INSERT INTO prompt_traces(task_id, iteration, body) VALUES (?, ?, ?) ON CONFLICT(task_id, iteration) DO UPDATE SET body = excluded.body').run(trace.taskId, trace.iteration, JSON.stringify(trace))
+        },
+        finishPromptTrace(taskId, iteration, status, usage, error) {
+          const row = db.prepare('SELECT body FROM prompt_traces WHERE task_id = ? AND iteration = ?').get(taskId, iteration) as { body: string } | undefined
+          if (!row) throw new Error(`Unknown Prompt trace: ${taskId}/${iteration}`)
+          const trace = JSON.parse(row.body) as PromptTrace
+          Object.assign(trace, { status, inputTokens: usage?.inputTokens ?? null, outputTokens: usage?.outputTokens ?? null, totalTokens: usage?.totalTokens ?? null, error: error ?? null })
+          db.prepare('UPDATE prompt_traces SET body = ? WHERE task_id = ? AND iteration = ?').run(JSON.stringify(trace), taskId, iteration)
+        },
+        listPromptTraces(taskId) {
+          taskRow(taskId)
+          return (db.prepare('SELECT body FROM prompt_traces WHERE task_id = ? ORDER BY iteration').all(taskId) as Array<{ body: string }>).map((row) => JSON.parse(row.body) as PromptTrace)
         },
         close() {
           if (closed) return

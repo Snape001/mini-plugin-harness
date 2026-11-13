@@ -1,16 +1,11 @@
 ---
 name: code-review
-description: Review existing source code for correctness, security, maintainability, and likely regressions. Use when a user asks to review code, inspect a function, or assess implementation quality.
-tags:
-  - code
-  - review
-  - security
+description: Assess existing code or a proposed change for concrete defects, security issues, and regressions; return findings without editing files. Use for review requests, not implementation or general architecture questions.
+tags: [code, review, findings]
 ---
 
 # Code review
 
-Inspect the relevant implementation and its callers before drawing conclusions. Use repository tools to read the actual files and cite paths and line numbers when possible.
+Inspect the requested code, relevant callers, and tests. Report actionable findings with affected path, conditions, and impact. Distinguish confirmed defects from uncertainty. If no defect is found, say so and identify meaningful coverage gaps.
 
-Prioritize concrete defects, unsafe behavior, broken edge cases, and regressions. Explain the impact and conditions that trigger each finding. Separate verified findings from questions or suggestions. If no actionable issue is found, say so and mention any important coverage gaps.
-
-Do not modify files. Do not infer behavior from names alone; follow the implementation and relevant tests.
+Do not edit files. For a requested fix, use targeted-code-fix; for a broad repository explanation, use repo-analysis.
