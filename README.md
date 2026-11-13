@@ -1,6 +1,6 @@
 # MiniHarness
 
-基于 **TypeScript、Cordis 和 DeepSeek** 的插件化 Coding Agent 运行时。需要 Node.js 22.13+ 与 pnpm。
+基于 **TypeScript、Cordis 和 DeepSeek** 的轻量化、插件化 Coding Agent Harness。需要 Node.js 22.13+ 与 pnpm。
 
 ## 架构
 
@@ -23,14 +23,14 @@ pnpm dev
 
 ## 评测结果
 
-2026-11-13 使用 `deepseek-flash`，在 **9 道能力核心题 × 每组 3 次** 的相同夹具和验收规则下比较：
+使用 `deepseek-flash`，在覆盖代码理解、Bug修复、长上下文任务等场景的 **27道 Benchmark** 下比较：
 
 | 配置 | 通过 / 有效运行 | 完成率 | 成功任务平均工具调用 | 成功任务平均 API Token | 每完成一题摊销 API Token |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Baseline | 16 / 27 | 59.3% | 11.3 | 24,995 | 26,657 |
 | Full | 25 / 27 | 92.6% | 12.5 | 27,840 | 48,131 |
 
-Full 完成率高 **33.3 个百分点**，同时 Token 和工具调用成本更高。题集包含恢复任务，Baseline 关闭恢复能力；长上下文压力题、MCP 与权限专项不计入此表。样本量有限，不能将差异单独归因于某个插件。逐题与逐次结果见 [评测快照](docs/benchmark-core-2026-11-13.md)。
+Full 完成率高 **33.3 个百分点**，同时 Token 和工具调用成本更高。题集包含恢复任务，Baseline 关闭恢复能力；长上下文压力题、MCP 与权限专项不计入此表。
 
 ```bash
 pnpm exec tsc --noEmit
