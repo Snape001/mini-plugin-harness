@@ -1,0 +1,33 @@
+{
+  "name": "mini-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "node --env-file=.env --import tsx src/cli.ts",
+    "start": "node --env-file=.env --import tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "eval": "tsx scripts/eval.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
+    "ajv": "^8.20.0",
+    "commander": "^14.0.0",
+    "cordis": "^3.18.0",
+    "js-yaml": "^4.1.0",
+    "pino": "^9.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server": "^2.4.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

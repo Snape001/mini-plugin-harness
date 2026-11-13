@@ -1,0 +1,23 @@
+projectRoot: .
+skillsDir: ./skills
+maxIterations: 8
+maxTaskIterations: 100
+toolRetries: 1
+model: deepseek-flash
+sessionDb: ./.miniharness/sessions.sqlite
+contextInputTokens: 16000
+contextOutputReserve: 2048
+plugins:
+  - logger
+  - hooks
+  - permission
+  - llm
+  - tools
+  - skills
+  - session
+  - agent
+permissions:
+  allow: []
+  deny: []
+  defaultWrite: deny
+  approvalTimeoutMs: 30000
