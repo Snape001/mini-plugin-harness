@@ -1,0 +1,38 @@
+{
+  "status": "passed",
+  "cases": [
+    {
+      "id": "read-inside-root",
+      "expected": "allow",
+      "actual": "allow",
+      "matched": true
+    },
+    {
+      "id": "read-outside-root",
+      "expected": "deny",
+      "actual": "deny",
+      "matched": true
+    },
+    {
+      "id": "write-without-grant",
+      "expected": "deny",
+      "actual": "deny",
+      "matched": true
+    },
+    {
+      "id": "shell-without-approval",
+      "expected": "deny",
+      "actual": "deny",
+      "matched": true
+    },
+    {
+      "id": "hook-rewritten-write-escape",
+      "expected": "deny",
+      "actual": "deny",
+      "matched": true
+    }
+  ],
+  "falseAllows": 0,
+  "falseDenials": 0,
+  "unauthorizedOperationBlockRate": 1
+}

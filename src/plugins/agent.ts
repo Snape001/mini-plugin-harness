@@ -117,7 +117,7 @@ export function createAgentPlugin(config: RuntimeConfig, overrides: Partial<Agen
             const stage = resumed && iteration === taskRecord.iteration + 1 ? 'resume' : iteration === 1 ? 'initial' : 'tool_followup'
             const rendered = promptService && promptSnapshot ? await promptService.render(promptSnapshot, stage, taskRecord.prompt, ctx.tools.definitions().map((item) => item.name), signal) : undefined
             const toolDefinitions = ctx.tools.definitions()
-            const injected = trace.injectedTurns === 0 ? skillMessages : []
+            const injected = skillMessages
             const contextOptions = { taskId, includeSessionHistory: capabilities.sessionContext, enhance: capabilities.contextEnhancements, prompt: rendered }
             let messages: ChatMessage[]
             try {

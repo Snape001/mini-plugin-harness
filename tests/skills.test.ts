@@ -22,13 +22,13 @@ afterEach(async () => {
 })
 
 describe('Skills Registry', () => {
-  it('loads all five generic Skills with distinct task boundaries', async () => {
+  it('loads all six generic Skills with distinct task boundaries', async () => {
     const root = await tempDir()
     const config = configSchema.parse({ projectRoot: root, skillsDir: path.resolve('skills'), plugins: ['logger', 'skills'] })
     const runtime = await createRuntime(config)
     try {
       const names = runtime.ctx.skills.list().map((item) => item.name)
-      expect(names).toEqual(['bug-investigation', 'code-review', 'multi-file-consistency', 'repo-analysis', 'targeted-code-fix'])
+      expect(names).toEqual(['bug-investigation', 'code-review', 'multi-file-consistency', 'repo-analysis', 'safe-release', 'targeted-code-fix'])
       for (const name of names) {
         const skill = await runtime.ctx.skills.load(name)
         expect(skill.content.length).toBeGreaterThan(50)
@@ -133,7 +133,7 @@ describe('Skills in the Agent loop', () => {
     }), fakeFetch)
   }
 
-  it('records selection usage and injects bounded Skill content only on the first model turn', async () => {
+  it('records selection usage and refreshes bounded Skill content on every model turn', async () => {
     process.env.DEEPSEEK_API_KEY = 'test-secret'
     const root = await tempDir()
     const requests: Array<Record<string, unknown>> = []
@@ -154,16 +154,16 @@ describe('Skills in the Agent loop', () => {
       expect(await runtime.ctx.agent.run('Locate the relevant source file', session.id)).toBe('Done.')
       const task = runtime.ctx.session.listTasks(session.id)[0]
       const trace = runtime.ctx.session.getSkillTrace(task.id)!
-      expect(trace).toMatchObject({ status: 'selected', selected: ['repo-analysis'], selectionRequests: 1, selectionUsage: { totalTokens: 25 }, injectedTurns: 1 })
+      expect(trace).toMatchObject({ status: 'selected', selected: ['repo-analysis'], selectionRequests: 1, selectionUsage: { totalTokens: 25 }, injectedTurns: 2 })
       expect(trace.loads[0].status).toBe('loaded')
       expect(trace.contextTokens).toBeGreaterThan(0)
-      expect(trace.contextTokens).toBeLessThanOrEqual(180)
+      expect(trace.contextTokens).toBeLessThanOrEqual(360)
       const firstMessages = requests[1].messages as Array<{ content?: string }>
       const secondMessages = requests[2].messages as Array<{ content?: string }>
       const injected = firstMessages.find((item) => item.content?.includes('External Skill instructions'))!
       expect(estimateTokens(injected)).toBeLessThanOrEqual(180)
       expect(injected.content).toContain('Skill truncated')
-      expect(secondMessages.some((item) => item.content?.includes('External Skill instructions'))).toBe(false)
+      expect(secondMessages.some((item) => item.content?.includes('External Skill instructions'))).toBe(true)
     } finally { await runtime.dispose() }
   })
 

@@ -1,0 +1,8 @@
+name: benchmark-followup
+description: General tool followup guidance without repeated reads
+version: '2'
+type: task
+stages: [tool_followup, resume]
+template: |
+  Continue: {{task}}
+  Use prior tool results; do not repeat completed reads; verify once.

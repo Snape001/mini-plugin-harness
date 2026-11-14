@@ -44,6 +44,7 @@ export interface EvaluationRun {
   toolDurationMs: number
   suite?: string
   category?: string
+  scored?: boolean
   failureKind?: 'infrastructure' | 'model_execution' | 'acceptance'
   stepResults?: Array<{ index: number; passed: boolean; detail: string }>
   expectedSkills?: string[]
@@ -179,10 +180,31 @@ export function summarizeRuns(runs: EvaluationRun[]): MetricSummary[] {
 const ratio = (value: number | null) => value === null ? 'n/a' : `${(value * 100).toFixed(1)}%`
 const number = (value: number | null, digits = 1) => value === null ? 'n/a' : value.toFixed(digits)
 
+export function renderPluginEffectTable(runs: EvaluationRun[]) {
+  const taskIds = [...new Set(runs.filter((run) => run.taskId.startsWith('plugin-')).map((run) => run.taskId))]
+  if (!taskIds.length) return ''
+  const lines = [
+    '## Plugin-gated task effects',
+    '',
+    '| Task | Group | Passed / valid | Tokens / success | Tools / success | Agent rounds | API calls | Summary calls |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |',
+  ]
+  for (const taskId of taskIds) {
+    const groups = [...new Set(runs.filter((run) => run.taskId === taskId).map((run) => run.group))]
+    for (const group of groups) {
+      const items = runs.filter((run) => run.taskId === taskId && run.group === group && run.status !== 'infrastructure_error')
+      const success = items.filter((run) => run.status === 'passed')
+      const withUsage = success.filter((run) => run.usageComplete && run.totalTokens !== null)
+      lines.push(`| ${taskId} | ${group} | ${success.length}/${items.length} | ${number(mean(withUsage.map((run) => run.totalTokens!)), 0)} | ${number(mean(success.map((run) => run.toolCalls)))} | ${number(mean(items.map((run) => run.agentRequests ?? run.modelRounds ?? run.modelRequests)))} | ${number(mean(items.map((run) => run.modelRequests)))} | ${number(mean(items.map((run) => run.summaryRequests ?? 0)))} |`)
+    }
+  }
+  return lines.join('\n')
+}
+
 export function renderMarkdown(summary: MetricSummary[], runs: EvaluationRun[]) {
   const rows = summary.map((item) => `| ${item.taskId} | ${item.group} | ${item.completedRuns}/${item.validRuns} | ${ratio(item.completionRate)} | ${number(item.meanToolCallsOnSuccess)} | ${number(item.meanModelRounds)} | ${number(item.meanTotalTokens, 0)} | ${number(item.meanLatencyMs, 0)} | ${ratio(item.skillSelectionAccuracy)} | ${ratio(item.promptStageComplianceRate)} | ${ratio(item.contextPreservationRate)} | ${ratio(item.contextCompressionRate)} | ${ratio(item.mcpDiscoveryRate)} | ${ratio(item.mcpRecoveryRate)} | ${item.infrastructureErrors} |`)
   const groupStats = [...new Set(summary.map((item) => item.group))].map((group) => {
-    const sharedRunItems = runs.filter((run) => run.group === group && (run.suite === 'common' || (!run.suite && run.taskId !== 'fault-recovery')))
+    const sharedRunItems = runs.filter((run) => run.group === group && run.scored !== false && (run.suite === 'common' || (!run.suite && run.taskId !== 'fault-recovery')))
     const validRuns = sharedRunItems.filter((run) => run.status !== 'infrastructure_error')
     const successful = validRuns.filter((run) => run.status === 'passed')
     const usageValid = validRuns.filter((run) => run.usageComplete && run.totalTokens !== null)
@@ -271,6 +293,8 @@ export function renderMarkdown(summary: MetricSummary[], runs: EvaluationRun[]) 
     '| Contrast | Completion difference | Amortized token difference | API calls / successful task difference |',
     '| --- | ---: | ---: | ---: |',
     ...fullMinus,
+    '',
+    renderPluginEffectTable(runs),
     '',
     '## Individual runs',
     '',

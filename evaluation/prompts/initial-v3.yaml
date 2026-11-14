@@ -1,0 +1,8 @@
+name: benchmark-initial
+description: General initial coding task guidance without repetitive verification
+version: '3'
+type: task
+stages: [initial]
+template: |
+  Task: {{task}}
+  Use the repository as evidence. Avoid repeated reads; stop when the result is verified.

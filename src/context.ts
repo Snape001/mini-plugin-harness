@@ -65,9 +65,9 @@ function* byteChunks(value: string, maxBytes: number): Generator<string> {
 }
 
 const instructions: Record<ContextLevel, string> = {
-  L1: 'Summarize recent dialogue lightly. Retain important tool actions, findings, decisions, and unresolved work. Keep the result concise.',
-  L2: 'Summarize middle history moderately. Retain task goals, key findings, decisions, and unresolved work. Omit routine exchanges and redundant detail.',
-  L3: 'Summarize early history aggressively. Retain only durable facts, major decisions, and unfinished work. Omit transient details.',
+  L1: 'Summarize recent dialogue lightly. Retain important tool actions, findings, decisions, and unresolved work. Preserve exact identifiers (IDs, constants, file paths, API names, decision numbers) verbatim.',
+  L2: 'Summarize middle history moderately. Retain task goals, key findings, decisions, and unresolved work. Preserve exact identifiers (IDs, constants, file paths, API names, decision numbers) verbatim. Omit routine exchanges and redundant detail.',
+  L3: 'Summarize early history aggressively. Retain only durable facts, major decisions, and unfinished work. Preserve exact identifiers (IDs, constants, file paths, API names, decision numbers) verbatim. Omit transient details.',
 }
 
 async function summarizeRaw(entries: StoredMessage[], previous: string | undefined, inputLimit: number, llm: LlmService, level: ContextLevel, targetTokens: number, signal?: AbortSignal): Promise<string> {
@@ -168,17 +168,21 @@ export async function buildContext(
   const lastCovered = checkpoints.reduce((max, item) => Math.max(max, item.throughMessageId), 0)
   const original = session.listMessagesSince(sessionId, lastCovered, scopedTaskId)
   const taskPrompt = options.taskId && options.prompt ? session.getTask(options.taskId).prompt : undefined
-  const compose = (items: StoredMessage[], summaries = checkpoints): ChatMessage[] => [
-    { role: 'system', content: options.prompt ? `${SAFETY}\n\n${options.prompt.system}` : SYSTEM },
-    ...(options.prompt?.tool ? [{ role: 'system' as const, content: `Tool usage guidance:\n${options.prompt.tool}` }] : []),
-    ...skillMessages,
-    ...(['L3', 'L2', 'L1'] as const).flatMap((level) => {
-      const content = summaries.filter((item) => item.level === level).map((item) => item.content).join('\n')
-      return content ? [summaryMessage(level, content)] : []
-    }),
-    ...items.map((item) => taskPrompt && item.taskId === options.taskId && item.message.role === 'user' && item.message.content === taskPrompt
-      ? { ...item.message, content: options.prompt!.task } : item.message),
-  ]
+  const compose = (items: StoredMessage[], summaries = checkpoints): ChatMessage[] => {
+    const hasCurrentTask = items.some((item) => taskPrompt && item.taskId === options.taskId && item.message.role === 'user' && item.message.content === taskPrompt)
+    return [
+      { role: 'system', content: options.prompt ? `${SAFETY}\n\n${options.prompt.system}` : SYSTEM },
+      ...(options.prompt?.tool ? [{ role: 'system' as const, content: `Tool usage guidance:\n${options.prompt.tool}` }] : []),
+      ...skillMessages,
+      ...(['L3', 'L2', 'L1'] as const).flatMap((level) => {
+        const content = summaries.filter((item) => item.level === level).map((item) => item.content).join('\n')
+        return content ? [summaryMessage(level, content)] : []
+      }),
+      ...(options.prompt && taskPrompt && !hasCurrentTask ? [{ role: 'user' as const, content: options.prompt.task }] : []),
+      ...items.map((item) => taskPrompt && item.taskId === options.taskId && item.message.role === 'user' && item.message.content === taskPrompt
+        ? { ...item.message, content: options.prompt!.task } : item.message),
+    ]
+  }
   let remaining = original
   let messages = compose(remaining)
   let summaryFailure: unknown
@@ -196,9 +200,11 @@ export async function buildContext(
   })
   const l0Target = Math.max(64, allocateLayerBudgets(available, layerBudget, demand()).L0)
   const needsCompression = () => cost(messages, tools) > softLimit || (['L1', 'L2', 'L3'] as const).some((level) => checkpointCost(checkpoints, level) > layerBudget[level].max || checkpoints.filter((item) => item.level === level).length > 3)
+  let buildSummaryCalls = 0
 
   async function addCheckpoint(level: ContextLevel, entries: StoredMessage[], removed: ContextCheckpoint[] = [], range?: { fromMessageId: number; throughMessageId: number }): Promise<void> {
     if (!entries.length) return
+    if (++buildSummaryCalls > 4) throw new Error('Context summary call cap reached for this build')
     const fromMessageId = range?.fromMessageId ?? entries[0].id
     const throughMessageId = range?.throughMessageId ?? entries.at(-1)!.id
     const remaining = checkpoints.filter((item) => item.level === level && !removed.some((candidate) => candidate.id === item.id))
@@ -211,7 +217,10 @@ export async function buildContext(
     for (let attempt = 0; attempt <= 2; attempt++) {
       const target = Math.max(16, Math.floor(initialTarget / (2 ** attempt)))
       try {
-        const candidate = await summarizeRaw(entries, undefined, inputLimit, llm, level, target, signal)
+        let candidate = await summarizeRaw(entries, undefined, inputLimit, llm, level, target, signal)
+        const identifiers = [...new Set((entries.map((entry) => JSON.stringify(entry.message)).join('\n').match(/\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g) ?? []))].slice(0, 8)
+        const missing = identifiers.filter((identifier) => !candidate.includes(identifier))
+        if (missing.length) candidate += `\nKey identifiers: ${missing.join(', ')}`
         const combinedCost = checkpointCost([...remaining, { level, content: candidate } as ContextCheckpoint], level)
         if (combinedCost > layerBudget[level].max) throw new Error(`Context ${level} summary exceeds its remaining budget (${combinedCost}/${layerBudget[level].max} estimated tokens)`)
         content = candidate
@@ -292,7 +301,7 @@ export async function buildContext(
         remaining = groups.slice(movable.length).flatMap((group) => group.entries)
         messages = compose(remaining)
       }
-      for (let pass = 0; pass < 20; pass++) {
+      for (let pass = 0; pass < 4; pass++) {
         const l1Count = checkpoints.filter((item) => item.level === 'L1').length
         const l2Count = checkpoints.filter((item) => item.level === 'L2').length
         const l3Count = checkpoints.filter((item) => item.level === 'L3').length

@@ -1,0 +1,10 @@
+name: benchmark-followup
+description: Repair-contract followup protocol for plugin-gated prompt evaluation
+version: '3'
+type: task
+scenarios: [repair-contract]
+stages: [tool_followup, resume]
+priority: 10
+template: |
+  Continue: {{task}}
+  Use prior tool results. Keep or create repair-plan.md with CONTRACT-PR-4, ROOT_CAUSE:, and NEXT_ACTION:. Do not finish until verification.md contains CONTRACT-PR-4 and PASS: yes.

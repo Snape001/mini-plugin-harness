@@ -1,8 +1,0 @@
-name: benchmark-initial
-description: General initial coding task guidance
-version: '2'
-type: task
-stages: [initial]
-template: |
-  Task: {{task}}
-  Check the relevant files and verify the result.

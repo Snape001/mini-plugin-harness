@@ -12,7 +12,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "eval": "tsx scripts/eval.ts",
-    "eval:benchmark": "node --env-file-if-exists=.env --import tsx scripts/eval-benchmark.ts"
+    "eval:benchmark": "node --env-file-if-exists=.env --import tsx scripts/eval-benchmark.ts",
+    "merge:benchmark": "node --import tsx scripts/merge-benchmark.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.4.0",

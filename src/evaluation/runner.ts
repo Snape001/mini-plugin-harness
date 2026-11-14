@@ -3,16 +3,18 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { TaskPausedError } from '../plugins/agent.js'
 import { createRuntime } from '../runtime.js'
 import { configSchema } from '../config.js'
 import { estimateTokens } from '../context.js'
 import type { AgentCapabilities, ApprovalHandler, ChatMessage, ContextCheckpoint, PromptTrace, SkillTrace, ToolDefinition, ToolRegistration } from '../types.js'
-import { benchmarkTasks, benchmarkVersion, candidateCommonTasks, commonBenchmarkTasks, prepareFixture } from './benchmark.js'
+import { benchmarkTasks, benchmarkVersion, prepareFixture, resume20Tasks } from './benchmark.js'
 import { renderCsv, renderMarkdown, summarizeRuns, type ContextRequestObservation, type EvaluationGroup, type EvaluationRun } from './metrics.js'
 
 export interface BenchmarkOptions {
   tasks?: string[]
+  suite?: string
   groups?: EvaluationGroup[]
   repetitions?: number
   maxAgentRounds?: number
@@ -92,9 +94,12 @@ function inspectContextRequest(messages: ChatMessage[], tools: ToolDefinition[],
   }
 }
 
-function promptStagesValid(traces: PromptTrace[], resumed = false): boolean {
+function promptStagesValid(traces: PromptTrace[], resumed = false, taskId?: string): boolean {
+  const repairContract = taskId === 'plugin-prompt-repair-contract'
   return traces.length > 0 && traces.every((trace) => {
-    const expected = trace.stage === 'initial' ? 'task/benchmark-initial@2' : 'task/benchmark-followup@1'
+    const expected = trace.stage === 'initial'
+      ? (repairContract ? 'task/benchmark-initial@4' : 'task/benchmark-initial@3')
+      : (repairContract ? 'task/benchmark-followup@3' : 'task/benchmark-followup@2')
     const correctStage = trace.stage === (trace.iteration === 1 ? 'initial' : resumed && trace.iteration === 2 ? 'resume' : 'tool_followup')
     return trace.status === 'completed' && correctStage
       && trace.templates.some((item) => item.id === expected && item.digest.length === 64)
@@ -160,11 +165,12 @@ function createConfig(workspace: string, stateRoot: string, taskId: string, grou
   const task = benchmarkTasks.find((item) => item.id === taskId)
   const mcpTask = task?.suite === 'mcp'
   const compressionTask = taskId === 'context-compression'
+  const repairContract = taskId === 'plugin-prompt-repair-contract'
   const contextBudget = evaluationContextSettings(taskId, task?.contextBudget)
   const contextLayers = compressionTask
     ? { L0: { initial: 900, max: 1600 }, L1: { initial: 180, max: 300 }, L2: { initial: 100, max: 180 }, L3: { initial: 128, max: 256 } }
     : task?.suite === 'context' || task?.candidateFamily === 'context'
-      ? { L0: { initial: 900, max: 1600 }, L1: { initial: 500, max: 900 }, L2: { initial: 250, max: 500 }, L3: { initial: 200, max: 400 } }
+      ? { L0: { initial: 900, max: 1600 }, L1: { initial: 700, max: 1200 }, L2: { initial: 350, max: 700 }, L3: { initial: 250, max: 500 } }
       : undefined
   return configSchema.parse({
     projectRoot: workspace,
@@ -181,7 +187,12 @@ function createConfig(workspace: string, stateRoot: string, taskId: string, grou
       ...(contextLayers ? { layers: contextLayers } : {}),
     },
     plugins: pluginSets[group],
-    prompts: { versions: { 'task/benchmark-initial': '2' } },
+    prompts: {
+      versions: repairContract
+        ? { 'task/benchmark-initial': '4', 'task/benchmark-followup': '3' }
+        : { 'task/benchmark-initial': '3', 'task/benchmark-followup': '2' },
+      ...(repairContract ? { taskTypes: [{ type: 'repair-contract', keywords: ['repair-contract'] }] } : {}),
+    },
     permissions: { allow: ['write_file', 'benchmark_interrupt'], deny: [], defaultWrite: 'deny', approvalTimeoutMs: 1000 },
     mcp: {
       servers: mcpTask && group.startsWith('full') ? [{
@@ -232,7 +243,8 @@ function restrictedTestTool(workspace: string): ToolRegistration {
       const target = await safeTestFile(workspace, args.path)
       if (!target) throw new Error('Test path is outside the isolated workspace')
       const env = { SystemRoot: process.env.SystemRoot ?? '', PATH: path.dirname(process.execPath) }
-      const { stdout, stderr } = await runFile(process.execPath, ['--permission', `--allow-fs-read=${path.resolve(workspace)}`, '--test-isolation=none', '--test', path.relative(workspace, target)], {
+      const script = `await import(${JSON.stringify(pathToFileURL(target).href)})`
+      const { stdout, stderr } = await runFile(process.execPath, ['--permission', `--allow-fs-read=${path.resolve(workspace)}`, '--input-type=module', '-e', script], {
         cwd: workspace, timeout: 60_000, maxBuffer: 256_000, windowsHide: true, env,
       })
       return { content: [{ type: 'text', text: `${stdout}${stderr}`.slice(0, 32_000) }], isError: false }
@@ -380,12 +392,12 @@ async function runOne(taskId: string, group: EvaluationGroup, repetition: number
     skillSelectionDurationMs: skillTraces.reduce((sum, trace) => sum + trace.selectionDurationMs, 0),
     skillSelectionTokens: skillSelectionTokens(skillTraces),
     skillContextTokens: skillTraces.reduce((sum, trace) => sum + trace.contextTokens, 0),
-    suite: task.suite ?? 'common', category: task.category, failureKind, stepResults, toolTrace,
+    suite: task.suite ?? 'common', category: task.category, scored: task.scored ?? true, failureKind, stepResults, toolTrace,
     expectedSkills: task.expectedSkills,
     skillSelectionCorrect: evaluateSkillSelection(task.expectedSkills, capabilities[group].skills, skillTraces),
-    promptTraces, promptStageCompliant: pluginSets[group].includes('prompt') ? promptStagesValid(promptTraces) : null,
+    promptTraces, promptStageCompliant: pluginSets[group].includes('prompt') ? promptStagesValid(promptTraces, false, taskId) : null,
     contextCheckpoints, contextTimeline, contextRequests,
-    contextPreserved: task.suite === 'context' || task.candidateFamily === 'context' ? contextRequests.length > 0 && contextRequests.every((item) => item.recentTaskPresent && item.toolLinksValid && item.estimatedTokens <= item.inputLimit) : null,
+    contextPreserved: task.suite === 'context' || task.candidateFamily === 'context' || task.capability === 'context' ? contextRequests.length > 0 && contextRequests.every((item) => item.recentTaskPresent && item.toolLinksValid && item.estimatedTokens <= item.inputLimit) : null,
     contextCompressionObserved: taskId === 'context-compression' ? (['L1', 'L2', 'L3'] as const).every((level) => contextRequests.some((item) => item.summaryLevels.includes(level))) : ['candidate-context-page17-recall', 'candidate-context-long-history-decisions'].includes(taskId) ? (['L2', 'L3'] as const).every((level) => contextRequests.some((item) => item.summaryLevels.includes(level))) : null,
     mcpDiscovered,
     mcpToolCount,
@@ -504,7 +516,7 @@ async function runRecoveryOne(group: EvaluationGroup, repetition: number, option
     skillSelectionDurationMs: skillTraces.reduce((sum, trace) => sum + trace.selectionDurationMs, 0),
     skillSelectionTokens: skillSelectionTokens(skillTraces),
     skillContextTokens: skillTraces.reduce((sum, trace) => sum + trace.contextTokens, 0),
-    promptTraces, promptStageCompliant: pluginSets[group].includes('prompt') ? promptStagesValid(promptTraces, true) : null,
+    promptTraces, promptStageCompliant: pluginSets[group].includes('prompt') ? promptStagesValid(promptTraces, true, taskId) : null,
     recoveryEligible: capabilities[group].recovery,
     recoverySucceeded: capabilities[group].recovery ? status === 'passed' : undefined,
     unknownCallsReplayed: replayed,
@@ -627,8 +639,10 @@ async function runMcpRecoveryScenario(repetition: number): Promise<EvaluationRun
 
 export async function runBenchmark(options: BenchmarkOptions = {}) {
   const repetitions = options.repetitions ?? 3
-  const selectedTasks = options.tasks?.length ? options.tasks : [...commonBenchmarkTasks.map((task) => task.id), ...benchmarkTasks.filter((task) => task.suite).map((task) => task.id), 'fault-recovery', 'mcp-recovery']
-  const selectedGroups = options.groups?.length ? options.groups : groups
+  const resume20 = options.suite === 'resume-20-v1'
+  if (options.suite && !resume20) throw new Error(`Unknown benchmark suite: ${options.suite}`)
+  const selectedTasks = options.tasks?.length ? options.tasks : resume20Tasks.map((task) => task.id)
+  const selectedGroups: EvaluationGroup[] = options.groups?.length ? options.groups : ['baseline', 'session-context', 'prompt', 'full']
   const maxAgentRounds = options.maxAgentRounds ?? MAX_AGENT_ROUNDS
   const timeoutMs = options.timeoutMs ?? 900_000
   if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > 20) throw new Error('Repetitions must be an integer from 1 to 20')
@@ -677,23 +691,30 @@ export async function runBenchmark(options: BenchmarkOptions = {}) {
   const outputDirectory = path.resolve(options.outputDirectory ?? path.join('.miniharness', 'evals', 'benchmark', timestamp))
   await mkdir(outputDirectory, { recursive: true })
   const report = {
-    version: 7,
+    version: 9,
     fixtureVersion: benchmarkVersion,
     createdAt: new Date().toISOString(),
     model: 'deepseek-flash',
-    configurations: Object.fromEntries(selectedGroups.map((group) => [group, { plugins: pluginSets[group], capabilities: capabilities[group], toolRetries: 0, maxIterations: maxAgentRounds, maxTaskIterations: maxAgentRounds, ordinaryTaskIterations: maxAgentRounds, recoverySegmentIterations: 8, contextBudgetNote: 'contextInputTokens in taskSet is the hard input limit; output reserve is separate (2048 tokens, or 512 for context-compression). Context-compression L3 max is 256 tokens.', prompts: pluginSets[group].includes('prompt') ? { versions: { 'task/benchmark-initial': '2' }, templates: ['task/benchmark-initial@2', 'task/benchmark-followup@1'] } : null, permissions: { allow: ['write_file', 'benchmark_interrupt'], deny: [], defaultWrite: 'deny' } }])),
+    configurations: Object.fromEntries(selectedGroups.map((group) => [group, { plugins: pluginSets[group], capabilities: capabilities[group], toolRetries: 0, maxIterations: maxAgentRounds, maxTaskIterations: maxAgentRounds, ordinaryTaskIterations: maxAgentRounds, recoverySegmentIterations: 8, contextBudgetNote: 'contextInputTokens in taskSet is the hard input limit; output reserve is separate (2048 tokens, or 512 for context-compression). Context-compression L3 max is 256 tokens. Prompt versions are per task in taskSet; the plugin-gated repair task uses initial@4/followup@3.', prompts: pluginSets[group].includes('prompt') ? { versions: { 'task/benchmark-initial': '3', 'task/benchmark-followup': '2' }, templates: ['task/benchmark-initial@3', 'task/benchmark-followup@2'] } : null, permissions: { allow: ['write_file', 'benchmark_interrupt'], deny: [], defaultWrite: 'deny' } }])),
     taskSet: selectedTasks.map((id) => {
       const task = benchmarkTasks.find((item) => item.id === id)
+      const meta = resume20Tasks.find((item) => item.id === id)
       const context = evaluationContextSettings(id, task?.contextBudget)
       return {
         id,
         suite: task ? task.suite ?? 'common' : id === 'fault-recovery' ? 'context' : 'mcp',
         category: task?.category ?? 'recovery',
         candidateFamily: task?.candidateFamily,
+        capability: meta?.capability ?? task?.capability,
+        scored: meta?.scored ?? task?.scored ?? true,
+        version: meta?.version,
         steps: task?.candidateFamily === 'recovery' ? 2 : task?.steps.length ?? 1,
         contextInputTokens: context.hardInputTokens,
         contextWindowTokens: context.contextWindowTokens,
         contextOutputReserve: context.outputReserve,
+        promptVersions: id === 'plugin-prompt-repair-contract'
+          ? { initial: '4', followup: '3' }
+          : { initial: '3', followup: '2' },
         ...(id === 'context-compression' ? { contextSoftThreshold: 0.6, layerBudgets: { L0: [900, 1600], L1: [180, 300], L2: [100, 180], L3: [128, 256] } } : task?.candidateFamily === 'context' ? { requiredSummaryLayers: ['L2', 'L3'] } : {}),
       }
     }),

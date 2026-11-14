@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "createdAt": "2026-11-14T07:17:24.238Z",
+  "scenarios": [
+    {
+      "name": "file-safety",
+      "status": "passed",
+      "durationMs": 27,
+      "detail": "Path/session boundaries passed; symlink checks skipped on Windows."
+    },
+    {
+      "name": "cancellation-recovery",
+      "status": "passed",
+      "durationMs": 48,
+      "detail": "Active call became unknown and the task remained resumable without replay."
+    },
+    {
+      "name": "mcp-failure-isolation",
+      "status": "passed",
+      "durationMs": 37,
+      "detail": "Unavailable local MCP server was isolated; built-in tools remained available."
+    },
+    {
+      "name": "tool-failure-trace",
+      "status": "passed",
+      "durationMs": 34,
+      "detail": "Read-only tool failure retried once and both attempts were persisted."
+    },
+    {
+      "name": "long-task-resume",
+      "status": "passed",
+      "durationMs": 37,
+      "detail": "Per-segment pause and manual resume completed in the same task."
+    },
+    {
+      "name": "context-summary-failure-recovery",
+      "status": "passed",
+      "durationMs": 33,
+      "detail": "Summary outage preserved raw history and checkpoints; recovery resumed within the hard input budget."
+    }
+  ],
+  "summary": {
+    "passed": 6,
+    "failed": 0,
+    "skipped": 0,
+    "durationMs": 216
+  }
+}

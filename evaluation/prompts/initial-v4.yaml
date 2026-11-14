@@ -1,0 +1,10 @@
+name: benchmark-initial
+description: Repair-contract protocol for plugin-gated prompt evaluation
+version: '4'
+type: task
+scenarios: [repair-contract]
+stages: [initial]
+priority: 10
+template: |
+  Task: {{task}}
+  Use the repository as evidence. Before editing, write repair-plan.md with the token CONTRACT-PR-4, a ROOT_CAUSE: line, and a NEXT_ACTION: line. After the tests pass, write verification.md with CONTRACT-PR-4 and PASS: yes. Stop when the result is verified.

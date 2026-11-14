@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { benchmarkTasks, candidateCommonTasks, candidateCoreTasks, commonBenchmarkTasks, prepareFixture } from '../src/evaluation/benchmark.js'
+import { benchmarkTasks, candidateCommonTasks, commonBenchmarkTasks, pluginGatedTasks, prepareFixture, resume20CoreTasks, resume20McpTasks, resume20Tasks } from '../src/evaluation/benchmark.js'
 import { renderCsv, renderMarkdown, summarizeRuns, type EvaluationRun } from '../src/evaluation/metrics.js'
 import { evaluateSkillSelection, evaluationContextSettings, evaluationGroups, missingUsageRequestCapReached, runBenchmark, runPermissionScenarios, skillSelectionMatchesExpected } from '../src/evaluation/runner.js'
 import { configSchema } from '../src/config.js'
@@ -39,31 +39,67 @@ describe('benchmark evaluation module', () => {
   })
 
   it('treats a task context budget as the hard input limit and records output reserve separately', () => {
-    expect(evaluationContextSettings('candidate-context-page17-recall', 4096)).toEqual({ hardInputTokens: 4096, outputReserve: 2048, contextWindowTokens: 6144 })
+    expect(evaluationContextSettings('plugin-context-cross-task-seal', 4096)).toEqual({ hardInputTokens: 4096, outputReserve: 2048, contextWindowTokens: 6144 })
     expect(evaluationContextSettings('context-compression', 4096)).toEqual({ hardInputTokens: 4096, outputReserve: 512, contextWindowTokens: 4608 })
-    expect(evaluationContextSettings('candidate-prompt-stage-config')).toEqual({ hardInputTokens: 13_952, outputReserve: 2_048, contextWindowTokens: 16_000 })
+    expect(evaluationContextSettings('candidate-prompt-requirement-revision')).toEqual({ hardInputTokens: 13_952, outputReserve: 2_048, contextWindowTokens: 16_000 })
   })
 
-  it('retains fifteen legacy common tasks and adds twelve frozen calibration candidates', async () => {
-    expect(commonBenchmarkTasks).toHaveLength(27)
-    expect(candidateCommonTasks).toHaveLength(12)
-    expect(candidateCoreTasks).toHaveLength(9)
-    expect(new Set(candidateCoreTasks.map((task) => task.candidateFamily))).toEqual(new Set(['skills', 'prompt', 'recovery']))
-    for (const family of ['skills', 'prompt', 'context', 'recovery']) expect(candidateCommonTasks.filter((task) => task.candidateFamily === family)).toHaveLength(3)
-    for (const category of ['code-understanding', 'bug-fix', 'feature-development', 'engineering', 'long-running']) {
-      expect(commonBenchmarkTasks.filter((task) => task.category === category)).toHaveLength(3)
-    }
-    for (const suite of ['skills', 'prompt', 'context', 'mcp']) expect(benchmarkTasks.filter((task) => task.suite === suite).length).toBeGreaterThanOrEqual(2)
+  it('keeps only the candidate tasks used by the final suite and prepares isolated fixtures', async () => {
+    expect(candidateCommonTasks.map((task) => task.id)).toEqual([
+      'candidate-skills-boundary-audit',
+      'candidate-prompt-requirement-revision',
+      'candidate-recovery-partial-write',
+    ])
     expect(new Set(benchmarkTasks.map((task) => task.id)).size).toBe(benchmarkTasks.length)
     const root = await tempDir()
     const fixtureRoot = path.resolve('evaluation/fixtures')
-    for (const task of commonBenchmarkTasks) {
+    for (const task of resume20CoreTasks) {
       const workspace = path.join(root, task.id)
       await mkdir(workspace, { recursive: true })
       await prepareFixture(task, workspace, fixtureRoot)
       expect(await readFile(path.join(workspace, 'answer.txt'), 'utf8').catch(() => '')).toBe('')
     }
     expect(evaluationGroups).toEqual(['baseline', 'skills', 'session-context', 'prompt', 'full', 'full-no-skills', 'full-no-prompt', 'full-no-context'])
+  })
+
+  it('defines a frozen 22-task suite with 20 scored tasks and 2 MCP diagnostics', () => {
+    expect(resume20Tasks).toHaveLength(22)
+    expect(resume20CoreTasks).toHaveLength(20)
+    expect(resume20McpTasks).toHaveLength(2)
+    expect(new Set(resume20Tasks.map((task) => task.id)).size).toBe(22)
+    expect(resume20CoreTasks.every((task) => task.scored === true && task.version === 'resume-20-v1')).toBe(true)
+    expect(resume20McpTasks.every((task) => task.scored === false && task.capability === 'mcp')).toBe(true)
+    expect(resume20CoreTasks.filter((task) => task.capability === 'recovery')).toHaveLength(1)
+    expect(resume20CoreTasks.some((task) => task.id === 'unit-test-addition')).toBe(false)
+    expect(pluginGatedTasks.map((task) => task.id)).toEqual(['plugin-skills-release-audit', 'plugin-context-cross-task-seal', 'plugin-prompt-repair-contract'])
+  })
+
+  it('gates the three plugin tasks on their plugin-provided information', async () => {
+    const root = await tempDir()
+    const fixtureRoot = path.resolve('evaluation/fixtures')
+    const { writeFile } = await import('node:fs/promises')
+    const skills = pluginGatedTasks.find((task) => task.id === 'plugin-skills-release-audit')!
+    await prepareFixture(skills, root, fixtureRoot)
+    expect((await skills.steps[0].verify(root, '')).passed).toBe(false)
+    await writeFile(path.join(root, 'audit.md'), 'POLICY-SR-7 BLOCKED\n', 'utf8')
+    await writeFile(path.join(root, 'release.json'), JSON.stringify({ channel: 'nightly', rollbackPlan: '' }), 'utf8')
+    expect((await skills.steps[0].verify(root, '')).passed).toBe(true)
+
+    const context = pluginGatedTasks.find((task) => task.id === 'plugin-context-cross-task-seal')!
+    await prepareFixture(context, root, fixtureRoot)
+    expect((await context.steps[0].verify(root, '')).passed).toBe(false)
+    await writeFile(path.join(root, 'handoff.txt'), 'SEAL: AMBER-9-QUARRY\n', 'utf8')
+    expect((await context.steps[0].verify(root, '')).passed).toBe(true)
+    expect((await context.steps[1].verify(root, '', [])).passed).toBe(false)
+    await writeFile(path.join(root, 'release.md'), 'SEAL: AMBER-9-QUARRY\nDECISION: HOLD\n', 'utf8')
+    expect((await context.steps[1].verify(root, '', [])).passed).toBe(true)
+    const prompt = pluginGatedTasks.find((task) => task.id === 'plugin-prompt-repair-contract')!
+    await prepareFixture(prompt, root, fixtureRoot)
+    expect((await prompt.steps[0].verify(root, '')).passed).toBe(false)
+    await writeFile(path.join(root, 'src/calc.mjs'), 'export const add = (a, b) => a + b\n', 'utf8')
+    await writeFile(path.join(root, 'repair-plan.md'), 'CONTRACT-PR-4\nROOT_CAUSE: subtraction\nNEXT_ACTION: add\n', 'utf8')
+    await writeFile(path.join(root, 'verification.md'), 'CONTRACT-PR-4\nPASS: yes\n', 'utf8')
+    expect((await prompt.steps[0].verify(root, '')).passed).toBe(true)
   })
 
   it('grades generated bug, feature, and engineering tasks with independent acceptance programs', async () => {
@@ -139,8 +175,8 @@ describe('benchmark evaluation module', () => {
     expect(result.report.runs[0].promptTraces).toHaveLength(0)
     expect(result.report.runs[1].promptTraces).toHaveLength(1)
     expect(result.report.runs[1].promptStageCompliant).toBe(true)
-    expect(result.report.runs[1].promptTraces?.[0].templates.map((item) => item.id)).toContain('task/benchmark-initial@2')
-    expect(result.report.runs[1].promptTraces?.[0].messages.some((item) => item.role === 'user' && item.content?.includes('Check the relevant files'))).toBe(true)
+    expect(result.report.runs[1].promptTraces?.[0].templates.map((item) => item.id)).toContain('task/benchmark-initial@3')
+    expect(result.report.runs[1].promptTraces?.[0].messages.some((item) => item.role === 'user' && item.content?.includes('Use the repository as evidence'))).toBe(true)
     expect(result.report.runs[1].contextRequests?.[0]).toMatchObject({ step: 0, recentTaskPresent: true, toolLinksValid: true })
     expect(result.report.runs.map((run) => run.suite)).toEqual(['common', 'common'])
   })
@@ -161,7 +197,7 @@ describe('benchmark evaluation module', () => {
     expect(run.status).toBe('passed')
     expect(run.promptStageCompliant).toBe(true)
     expect(run.promptTraces?.map((trace) => trace.stage)).toEqual(['initial', 'tool_followup'])
-    expect(run.promptTraces?.map((trace) => trace.templates.find((item) => item.id.startsWith('task/'))?.id)).toEqual(['task/benchmark-initial@2', 'task/benchmark-followup@1'])
+    expect(run.promptTraces?.map((trace) => trace.templates.find((item) => item.id.startsWith('task/'))?.id)).toEqual(['task/benchmark-initial@3', 'task/benchmark-followup@2'])
     expect(run.contextRequests?.[1]).toMatchObject({ recentTaskPresent: true, toolLinksValid: true })
   })
 
@@ -485,6 +521,6 @@ describe('benchmark evaluation module', () => {
     expect(run.status, run.detail).toBe('passed')
     expect(run.promptTraces?.map((trace) => trace.stage)).toEqual(['initial', 'resume', 'tool_followup'])
     expect(run.promptStageCompliant).toBe(true)
-    expect(run.promptTraces?.[0].templates.map((item) => item.id)).toContain('task/benchmark-initial@2')
+    expect(run.promptTraces?.[0].templates.map((item) => item.id)).toContain('task/benchmark-initial@3')
   })
 })

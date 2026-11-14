@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -64,6 +64,37 @@ describe('Prompt plugin', () => {
       const snapshot = await runtime.ctx.prompt.prepare(task.id, 'inspect')
       expect((await runtime.ctx.prompt.render(snapshot, 'initial', 'inspect', [])).task).toBe('beta inspect')
       expect((await runtime.ctx.prompt.render(snapshot, 'initial', 'inspect', [])).task).toBe('alpha inspect')
+    } finally { await runtime.dispose() }
+  })
+
+  it('pins the repair-contract protocol to initial v4 and followup v3', async () => {
+    process.env.DEEPSEEK_API_KEY = 'test'
+    const root = await workspace()
+    await copyFile(path.resolve('evaluation/prompts/initial-v4.yaml'), path.join(root, 'prompts', 'initial-v4.yaml'))
+    await copyFile(path.resolve('evaluation/prompts/followup-v3.yaml'), path.join(root, 'prompts', 'followup-v3.yaml'))
+    let calls = 0
+    const fetcher = vi.fn(async () => {
+      calls += 1
+      if (calls === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ finish_reason: 'tool_calls', message: { content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'list_files', arguments: '{}' } }] } }],
+          usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'done' } }], usage: { prompt_tokens: 12, completion_tokens: 2, total_tokens: 14 } }), { status: 200 })
+    }) as typeof fetch
+    const runtime = await createRuntime(config(root), fetcher)
+    try {
+      const session = runtime.ctx.session.createSession()
+      await runtime.ctx.agent.run('repair-contract: fix add', session.id, undefined, undefined, {
+        taskType: 'repair-contract',
+        versions: { 'task/benchmark-initial': '4', 'task/benchmark-followup': '3' },
+      })
+      const taskId = runtime.ctx.session.listTasks(session.id)[0].id
+      const traces = runtime.ctx.prompt.traces(taskId)
+      expect(traces[0].templates.map((item) => item.id)).toContain('task/benchmark-initial@4')
+      expect(traces[1].templates.map((item) => item.id)).toContain('task/benchmark-followup@3')
+      expect(JSON.stringify(traces[0].messages)).toContain('CONTRACT-PR-4')
     } finally { await runtime.dispose() }
   })
 
